@@ -1,0 +1,134 @@
+subnet-693cb430
+is public
+
+
+variable "registry_hostname" {}
+variable "registry_bucket" {
+  default = "dockerregistry"
+}
+
+variable "owner" {}
+
+variable "aws_region" {}
+variable "bucket_name" {}
+variable "bucket_region"{}
+variable "bucket_key"{}
+variable "hostedzone" {}
+variable "docker_compose_version" {
+  default = "1.6.2"
+}
+
+variable "security_group_ids" {}
+
+resource "terraform_remote_state" "vpc" {
+    backend = "s3"
+    config {
+        bucket = "${var.bucket_name}"
+        # The bucket is in us east wher we store the state
+        # (we actually don't have control of where the bucket will be created)
+        region = "${var.bucket_region}"
+        # But the key by convention includes the region the lab is setup for"
+        key = "${var.bucket_key}"
+    }
+}
+
+
+
+resource "aws_s3_bucket" "registry" {
+  bucket = "${var.registry_bucket}"
+  tags {
+    Name = "Docker Registry"
+  }
+}
+
+
+
+
+
+module "coreos_amis" {
+  source = "github.com/terraform-community-modules/tf_aws_coreos_ami"
+  region = "${var.aws_region}"
+  channel = "stable"
+  virttype = "hvm"
+}
+
+resource "aws_security_group" "docker_registry" {
+
+    name = "Docker Registry"
+    description = "Rules for the Rancher server instance."
+    vpc_id = "${terraform_remote_state.vpc.output.vpc_id}"
+
+    tags {
+        Name = "Docker Registry"
+        ManagedBy = "terraform"
+    }
+    lifecycle {
+        create_before_destroy = true
+    }
+
+}
+
+resource "aws_security_group_rule" "registry_port" {
+
+    security_group_id = "${aws_security_group.docker_registry.id}"
+    type = "ingress"
+    from_port = 5000
+    to_port = 5000
+    protocol = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+
+    lifecycle {
+        create_before_destroy = true
+    }
+
+}
+
+resource "aws_instance" "registry" {
+  #  availability_zone = "${var.aws_availability_zone}"
+    ami = "${module.coreos_amis.ami_id}"
+    subnet_id = "${terraform_remote_state.vpc.output.public_subnet_id}"
+    instance_type = "t2.micro"
+    key_name = "${terraform_remote_state.vpc.output.key_name}"
+    # Very very weird that I can't use the vpc output for this and have to
+    # supply it as a variable. Plus even when I do, it only allows two
+    vpc_security_group_ids = ["${terraform_remote_state.vpc.output.security_group_ids}",
+      "${aws_security_group.docker_registry.id}",
+      "${terraform_remote_state.vpc.output.nat_security_group}",
+      "${terraform_remote_state.vpc.output.web_security_group}"]
+    tags {
+      Name = "registry"
+      Owner = "${var.owner}"
+    }
+
+    connection {
+        user =  "core"
+        key_file = "${terraform_remote_state.vpc.output.key_file}"
+        /*bastion_host = "${terraform_remote_state.vpc.output.bastion_ip}"
+        bastion_user = "${terraform_remote_state.vpc.output.bastion_user}"
+        bastion_private_key = "${file(terraform_remote_state.vpc.output.key_file)}" Ã¥*/
+    }
+
+    provisioner "remote-exec" {
+        inline =  [
+            "echo 'hello world' > test.txt",
+            "curl http://www.google.com"
+        ]
+    }
+
+    //depends_on = ["module.workers"]
+}
+
+resource "aws_route53_record" "server_hostname" {
+
+    zone_id = "${var.hostedzone}"
+    name = "${var.registry_hostname}"
+    type = "A"
+    ttl = "30"
+    records = [
+        "${aws_instance.registry.public_ip}"
+    ]
+
+    lifecycle {
+        create_before_destroy = true
+    }
+}
