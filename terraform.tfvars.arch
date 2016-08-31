@@ -1,0 +1,13 @@
+owner =  "Josh M"
+
+aws_region = "us-west-1"
+aws_availability_zone = "us-west-1a"
+environment_name = "dev"
+ssh_keypath = "./shared-arch.pem"
+key_name = "shared_arch"
+public_subnet_id = "subnet-f3a7d196"
+
+//Allow web in, ssh, all traffic out (should probably change it to 80 and 443 only)
+security_group_ids = ["sg-ec080e89","sg-e2080e87","sg-e3080e86"]
+hostedzone = "Z2BNY8N7V5B91G"
+hostname = "joshtest.arch.genesys.com"
