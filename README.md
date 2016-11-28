@@ -15,4 +15,4 @@ you can run `make pause` to stop the instance
 
 Note that you need rsync on your system to be able to automatically download the files.
 
-Also note because we're grabbing 
+Also note because we're grabbing files over rsync from a mounted docker container the symlinks won't work
