@@ -1,51 +1,167 @@
 
-variable "aws_region"{}
 # TODO, this should be a list
-variable "aws_availability_zone" {}
-variable "owner" {}
-variable "environment_name"{}
 variable "ssh_keypath" {}
 variable "key_name" {}
+variable "vpc_id" {}
 variable "public_subnet_id" {}
-variable "security_group_ids" {
-  type = "list"
+
+variable "hostedzone" {}
+variable "hostname" {}
+variable "owner_email" {}
+
+//coreos amis
+variable "channel" {
+  default = "stable"
+}
+variable "virtualization_type" {
+  default = "hvm"
+}
+
+variable "certdir" {
+  default = "/var/certs/letsencrypt"
+}
+
+data "template_file" "getcerts" {
+  template = "${file("grabcert.sh.tpl")}"
+  vars {
+    certdir = "${var.certdir}"
+    owner_email = "${var.owner_email}"
+    fqdn = "${aws_route53_record.server_hostname.fqdn}"
+  }
 }
 
 
-module "coreos_amis" {
-  source = "github.com/terraform-community-modules/tf_aws_coreos_ami"
-  region = "${var.aws_region}"
-  channel = "stable"
-  virttype = "hvm"
+resource "null_resource" "run_certget" {
+  # Rerun if any of these change
+  triggers {
+    fqdn = "${aws_route53_record.server_hostname.fqdn}"
+    instance_id = "${aws_instance.default.id}"
+  }
+  connection {
+    user = "core"
+    host = "${var.hostname}"
+    private_key = "${file(var.ssh_keypath)}"
+  }
+
+  provisioner "remote-exec" {
+    inline=[
+      "cat << 'DOCKER_GET_CERT_SCRIPT' > /tmp/get_cert.sh",
+      "${data.template_file.getcerts.rendered}",
+      "DOCKER_GET_CERT_SCRIPT",
+      "sudo chmod 755 /tmp/get_cert.sh",
+      "sudo /tmp/get_cert.sh",
+      "sudo mkdir -p ${var.certdir}",
+      // Not exactly the most secure thing, but this
+      // instance should be deleted
+      "sudo chown -R core ${var.certdir}",
+      "/tmp/get_cert.sh",
+    ]
+  }
+
+  provisioner "local-exec" {
+     //Rsyncs over the files.  While it seems insecure to not do host key checking
+     //that interferes with automation, plus we JUST created this host seconds ago
+     //
+      command = <<EOC
+rsync -avzh -e 'ssh -o UserKnownHostsFile=/dev/null -o StrictHostKeyChecking=no -i keys/staging.pem' \
+        core@rancher.sandbox.backpackhealth.com:/var/certs/letsencrypt certs
+  EOC
+   }
 }
 
 
-resource "aws_instance" "registry" {
+resource "aws_route53_record" "server_hostname" {
+    zone_id = "${var.hostedzone}"
+    name = "${var.hostname}"
+    type = "A"
+    ttl = "30"
+    records = [
+        "${aws_instance.default.public_ip}"
+    ]
+    lifecycle {
+        create_before_destroy = true
+    }
+}
+
+
+data "aws_ami" "coreos" {
+  most_recent = true
+  filter {
+    name   = "architecture"
+    values = ["x86_64"]
+  }
+  filter {
+    name = "virtualization-type"
+    values = ["${var.virtualization_type}"]
+  }
+  filter {
+    name   = "name"
+    values = ["CoreOS-${var.channel}-*"]
+  }
+}
+
+
+resource "aws_instance" "default" {
   #  availability_zone = "${var.aws_availability_zone}"
-    ami = "${module.coreos_amis.ami_id}"
+    ami = "${data.aws_ami.coreos.image_id}"
     subnet_id = "${var.public_subnet_id}"
     instance_type = "t2.micro"
     key_name = "${var.key_name}"
-    # Very very weird that I can't use the vpc output for this and have to
-    # supply it as a variable. Plus even when I do, it only allows two
-    vpc_security_group_ids = ["${var.security_group_ids}",
-      "${aws_security_group.docker_registry.id}",
-      "${var.nat_security_group}",
-      "${var.web_security_group}"]
+    vpc_security_group_ids = ["${aws_security_group.allow_http_and_ssh.id}"]
     tags {
-      Name = "registry"
-      Owner = "${var.owner}"
+      Name = "certificategrabber"
+
     }
+    associate_public_ip_address="true"
 
     connection {
         user =  "core"
-        key_file = "${var.key_file}"
+        private_key = "${file(var.ssh_keypath)}"
     }
+}
 
-    provisioner "remote-exec" {
-        inline =  [
-            "docker run . . .",
-        ]
-    }
+output "instance_id" {
+  value = "${aws_instance.default.id}"
+}
+
+output "address" {
+  value = "${aws_instance.default.public_ip}"
+}
+resource "aws_security_group" "allow_http_and_ssh" {
+  name = "allow_http_and_ssh"
+  description = "Allow http inbound traffic"
+  vpc_id = "${var.vpc_id}"
+  ingress {
+      from_port = 80
+      to_port = 80
+       protocol = "tcp"
+
+      cidr_blocks = ["0.0.0.0/0"]
+  }
+
+ ingress {
+      from_port = 443
+      to_port = 443
+      protocol = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+  }
+ ingress {
+      from_port = 22
+      to_port = 22
+      protocol = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+      from_port = 80
+      to_port = 80
+      protocol = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+  }
+  egress {
+      from_port =443
+      to_port = 443
+      protocol = "tcp"
+      cidr_blocks = ["0.0.0.0/0"]
+  }
 
 }

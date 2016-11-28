@@ -13,3 +13,4 @@ workspace/*
 berks-cookbooks/
 chef/nodes/
 .vagrant/
+letsencrypt/
